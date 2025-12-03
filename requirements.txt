@@ -1,0 +1,10 @@
+yfinance==0.2.40
+beautifulsoup4==4.12.3
+requests==2.31.0
+fpdf2==2.7.9
+pandas==2.1.4
+numpy==1.26.2
+lxml==5.1.0
+html5lib==1.1
+
+
