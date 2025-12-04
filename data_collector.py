@@ -4,7 +4,8 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from stock_universe import STOCK_UNIVERSE
-
+import time
+import random
 
 class StockDataCollector:
     def __init__(self):
@@ -14,10 +15,15 @@ class StockDataCollector:
         }
 
     def get_market_indices(self):
-        """Fetch last 5 days for NIFTY & SENSEX for intraday context."""
+        """Fetch last 5 days for NIFTY & SENSEX"""
         try:
-            nifty = yf.Ticker("^NSEI").history(period="5d", interval="1d")
-            sensex = yf.Ticker("^BSESN").history(period="5d", interval="1d")
+            nifty = yf.Ticker("^NSEI").history(period="10d", interval="1d")
+            sensex = yf.Ticker("^BSESN").history(period="10d", interval="1d")
+
+            # Check if we have enough data
+            if len(nifty) < 2 or len(sensex) < 2:
+                print("Warning: Not enough index data")
+                return None
 
             def summarize(df):
                 cur = float(df["Close"].iloc[-1])
@@ -36,65 +42,68 @@ class StockDataCollector:
             print("Index fetch error:", e)
             return None
 
-    def get_stock_ohlc_intraday(self, symbol: str):
-        """
-        Get current day's intraday OHLCV (5-min) and last 30 days EOD data.
-        """
-        try:
-            today = datetime.now().date()
-            start = today - timedelta(days=30)
-            hist_daily = yf.download(
-                symbol, start=start, end=today + timedelta(days=1), interval="1d", progress=False
-            )
-            intraday = yf.download(
-                symbol, period="1d", interval="5m", progress=False
-            )
+    def get_stock_data_with_retry(self, symbol: str, max_retries=3):
+        """Fetch stock data with retry logic and delays"""
+        for attempt in range(max_retries):
+            try:
+                # Random delay between 1-3 seconds to avoid rate limiting
+                time.sleep(random.uniform(1.5, 3.0))
+                
+                today = datetime.now().date()
+                start = today - timedelta(days=45)
 
-            if hist_daily.empty:
-                return None
+                # Download data
+                hist_daily = yf.download(
+                    symbol, start=start, end=today + timedelta(days=1), 
+                    interval="1d", progress=False, timeout=10
+                )
 
-            current_price = float(hist_daily["Close"].iloc[-1])
-            month_return = (
-                (hist_daily["Close"].iloc[-1] - hist_daily["Close"].iloc[0])
-                / hist_daily["Close"].iloc[0]
-                * 100
-            )
-            volatility = hist_daily["Close"].pct_change().std() * 100
+                if hist_daily.empty or len(hist_daily) < 5:
+                    print(f"  Skipping {symbol}: insufficient data")
+                    return None
 
-            return {
-                "symbol": symbol.replace(".NS", ""),
-                "current_price": round(current_price, 2),
-                "month_return": round(float(month_return), 2),
-                "volatility": round(float(volatility), 2),
-                "eod_history": hist_daily.tail(30),
-                "intraday": intraday,
-            }
-        except Exception as e:
-            print("Error intraday", symbol, e)
-            return None
+                # Get fundamentals
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                
+                current_price = float(hist_daily["Close"].iloc[-1])
+                month_return = (
+                    (hist_daily["Close"].iloc[-1] - hist_daily["Close"].iloc[0])
+                    / hist_daily["Close"].iloc[0]
+                    * 100
+                )
+                volatility = hist_daily["Close"].pct_change().std() * 100
 
-    def get_stock_fundamentals(self, symbol: str):
-        """Use yfinance .info for PE, beta, dividend etc."""
-        try:
-            t = yf.Ticker(symbol)
-            info = t.info
-            return {
-                "symbol": symbol.replace(".NS", ""),
-                "name": info.get("shortName", symbol),
-                "sector": info.get("sector", "N/A"),
-                "pe_ratio": float(info.get("trailingPE") or 0),
-                "pb_ratio": float(info.get("priceToBook") or 0),
-                "market_cap": int(info.get("marketCap") or 0),
-                "beta": float(info.get("beta") or 1),
-                "dividend_yield": float(info.get("dividendYield") or 0) * 100,
-                "week52_high": float(info.get("fiftyTwoWeekHigh") or 0),
-                "week52_low": float(info.get("fiftyTwoWeekLow") or 0),
-            }
-        except Exception as e:
-            print("Fundamentals error", symbol, e)
-            return None
+                return {
+                    "symbol": symbol.replace(".NS", ""),
+                    "name": info.get("shortName", symbol.replace(".NS", "")),
+                    "sector": info.get("sector", "N/A"),
+                    "current_price": round(current_price, 2),
+                    "pe_ratio": float(info.get("trailingPE") or 0),
+                    "pb_ratio": float(info.get("priceToBook") or 0),
+                    "market_cap": int(info.get("marketCap") or 0),
+                    "beta": float(info.get("beta") or 1),
+                    "dividend_yield": float(info.get("dividendYield") or 0) * 100,
+                    "week52_high": float(info.get("fiftyTwoWeekHigh") or current_price),
+                    "week52_low": float(info.get("fiftyTwoWeekLow") or current_price),
+                    "month_return": round(float(month_return), 2),
+                    "volatility": round(float(volatility), 2),
+                }
+            
+            except Exception as e:
+                if "429" in str(e) or "Too Many Requests" in str(e):
+                    wait_time = (attempt + 1) * 5  # 5s, 10s, 15s
+                    print(f"  Rate limited on {symbol}, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"  Error {symbol}: {str(e)[:50]}")
+                    return None
+        
+        print(f"  Failed {symbol} after {max_retries} retries")
+        return None
 
-    def scrape_market_news(self, limit: int = 12):
+    def scrape_market_news(self, limit: int = 10):
         urls = [
             "https://economictimes.indiatimes.com/markets/stocks/news",
             "https://www.moneycontrol.com/news/business/markets/",
@@ -109,21 +118,27 @@ class StockDataCollector:
                     if text and len(text) > 25:
                         news.append(text)
             except Exception as e:
-                print("News error", e)
-        # dedupe and limit
+                print(f"News error: {str(e)[:50]}")
         return list(dict.fromkeys(news))[:limit]
 
     def get_all_stocks_snapshot(self):
-        """Return merged fundamentals + 30D + intraday meta for ALL stocks."""
+        """Fetch data for stocks with rate limiting"""
         data = []
-        for sym in self.stocks:
-            print("Fetching:", sym)
-            f = self.get_stock_fundamentals(sym)
-            o = self.get_stock_ohlc_intraday(sym)
-            if not f or not o:
-                continue
-            row = {**f, **{k: o[k] for k in ["current_price", "month_return", "volatility"]}}
-            data.append(row)
+        total = len(self.stocks)
+        
+        for idx, sym in enumerate(self.stocks, 1):
+            print(f"[{idx}/{total}] Fetching: {sym}")
+            stock_data = self.get_stock_data_with_retry(sym)
+            
+            if stock_data:
+                data.append(stock_data)
+            
+            # Extra delay every 10 stocks to be safe
+            if idx % 10 == 0:
+                print(f"  Progress checkpoint: {idx}/{total} done, pausing 5s...")
+                time.sleep(5)
+        
+        print(f"\nSuccessfully fetched: {len(data)}/{total} stocks")
         return data
 
     def sector_performance(self, all_data):
@@ -132,5 +147,3 @@ class StockDataCollector:
             return {}
         grp = df.groupby("sector")["month_return"].mean().sort_values(ascending=False)
         return grp.to_dict()
-
-
